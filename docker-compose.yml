@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:15
+    container_name: moex_postgres
+    env_file:
+      - .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: scheduler/Dockerfile
+    container_name: moex_scheduler
+    env_file:
+      - .env
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  api:  # ← НОВЫЙ СЕРВИС
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: moex_api
+    env_file:
+      - .env
+    ports:
+      - "8001:8000"
+    depends_on:
+      - db
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
