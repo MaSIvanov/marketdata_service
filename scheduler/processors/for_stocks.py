@@ -1,5 +1,14 @@
+# scheduler/processors/for_stocks.py
+
 import time
-from datetime import datetime
+import logging
+from contextlib import asynccontextmanager
+
+from scheduler.clients.moex_client import MOEXClient
+from scheduler.database.dao import upsert_market_data
+from scheduler.database.engine import get_db
+
+logger = logging.getLogger("scheduler.stocks")
 
 # Маппинг полей из API → наша модель
 FIELDS_MAP = {
@@ -9,11 +18,10 @@ FIELDS_MAP = {
     "OPEN": "open_price",
     "HIGH": "high_price",
     "LOW": "low_price",
-    "VALTODAY": "volume",                # Объём торгов (в деньгах)
-    "NUMTRADES": "trades_count",         # Количество сделок
+    "VALTODAY": "volume",
+    "NUMTRADES": "trades_count",
     "ISSUECAPITALIZATION": "capitalization",
     "TRENDISSUECAPITALIZATION": "change_capitalization",
-    # Убрали: TRADINGSTATUS, VOLTODAY
 }
 
 # Поля из securities (для доп. данных)
@@ -21,14 +29,13 @@ SEC_FIELDS_MAP = {
     "SHORTNAME": "shortname",
     "PREVPRICE": "prev_price",
     "CURRENCYID": "currency",
-    "LISTLEVEL": "list_level",           # ← новый ключ: уровень листинга
+    "LISTLEVEL": "list_level",
 }
 
 
 def process_stock_data(raw_data):
     start = time.time()
 
-    # Извлекаем данные
     marketdata = raw_data["marketdata"]
     columns = marketdata["columns"]
     rows = marketdata["data"]
@@ -39,7 +46,6 @@ def process_stock_data(raw_data):
     sec_rows = securities["data"]
     sec_col_idx = {col: idx for idx, col in enumerate(sec_columns)}
 
-    # Словарь для данных из securities по secid
     secid_to_data = {}
     secid_idx = sec_col_idx.get("SECID")
     if secid_idx is None:
@@ -51,19 +57,14 @@ def process_stock_data(raw_data):
         for moex_field, local_field in SEC_FIELDS_MAP.items():
             if moex_field in sec_col_idx:
                 value = row[sec_col_idx[moex_field]]
-                # Приводим пустые строки к None
                 if value == "" or value is None:
                     value = None
-                # Явно конвертируем LISTLEVEL в int, если возможно
                 if moex_field == "LISTLEVEL":
                     value = int(value) if value not in (None, "") else None
                 sec_data[local_field] = value
         secid_to_data[secid] = sec_data
 
-    # Результат
     parsed = []
-
-    # Проверяем обязательные поля
     required_cols = ["SECID", "BOARDID"]
     if not all(col in col_idx for col in required_cols):
         return []
@@ -78,7 +79,6 @@ def process_stock_data(raw_data):
             "instrument_type": "stock",
         }
 
-        # Заполняем поля из marketdata
         for moex_field, local_field in FIELDS_MAP.items():
             if moex_field not in col_idx:
                 continue
@@ -87,13 +87,11 @@ def process_stock_data(raw_data):
                 value = None
             item[local_field] = value
 
-        # Добавляем данные из securities
         sec_data = secid_to_data.get(secid, {})
         item["shortname"] = sec_data.get("shortname")
         item["currency"] = sec_data.get("currency")
-        item["list_level"] = sec_data.get("list_level")  # ← добавлено
+        item["list_level"] = sec_data.get("list_level")
 
-        # Расчёт change_abs и change_percent через PREVPRICE
         last_price = item.get("last_price")
         prev_price = sec_data.get("prev_price")
         if last_price is not None and prev_price is not None and prev_price != 0:
@@ -103,7 +101,6 @@ def process_stock_data(raw_data):
             item["change_abs"] = None
             item["change_percent"] = None
 
-        # Волатильность: (high - low) / open * 100
         open_price = item.get("open_price")
         high_price = item.get("high_price")
         low_price = item.get("low_price")
@@ -112,10 +109,34 @@ def process_stock_data(raw_data):
         else:
             item["volatility_percent"] = None
 
-        # === Убрали update_time и trading_status ===
-        # Больше нигде не используется
-
         parsed.append(item)
 
-    print(f"[Stocks] Обработано {len(parsed)} инструментов за {time.time() - start:.2f} сек")
+    logger.info(f"[Stocks] Обработано {len(parsed)} инструментов за {time.time() - start:.2f} сек")
     return parsed
+
+
+async def update_stocks():
+    """Полный цикл обновления акций: запрос → обработка → сохранение."""
+    logger.info("[Stocks] Запуск сбора данных...")
+    start_time = time.time()
+
+    async with MOEXClient() as client:
+        try:
+            raw_data = await client.get_stocks()
+            if not raw_data or 'securities' not in raw_data:
+                logger.warning("[Stocks] Пустой ответ от API")
+                return
+
+            processed_data = process_stock_data(raw_data)
+            if not processed_data:
+                logger.warning("[Stocks] Нет данных для сохранения после обработки")
+                return
+
+            async with get_db() as db:
+                await upsert_market_data(db, processed_data)
+
+            duration = time.time() - start_time
+            logger.info(f"[Stocks] ✅ Успешно сохранено {len(processed_data)} записей за {duration:.2f} сек")
+
+        except Exception as e:
+            logger.error(f"[Stocks] ❌ Ошибка: {e}", exc_info=True)

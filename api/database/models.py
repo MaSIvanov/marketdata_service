@@ -1,7 +1,7 @@
-# scheduler/database/models.py
+# api/database/models.py
 from sqlalchemy import (
-    Column, Integer, String, Float, Numeric, DateTime, Date, Boolean,
-    Index, text, MetaData
+    Column, Integer, String, Numeric, DateTime, Date,
+    Index, MetaData, PrimaryKeyConstraint
 )
 from sqlalchemy.dialects.postgresql import BIGINT
 from sqlalchemy.ext.declarative import declarative_base
@@ -37,8 +37,6 @@ class MarketData(Base):
         Index('ix_isin', 'isin'),
         Index('ix_updated_at', 'updated_at'),  # Для очистки старых данных
     )
-
-    # ... остальные поля без изменений ...
 
     # Общие атрибуты
     shortname = Column(String(255), nullable=True)
@@ -80,3 +78,27 @@ class MarketData(Base):
     lotsize = Column(Integer, nullable=True)
     issuesize = Column(BIGINT, nullable=True)
     issuesizeplaced = Column(BIGINT, nullable=True)
+
+
+
+class Candle(Base):
+    __tablename__ = "candles"
+
+    ticker = Column(String(20), nullable=False)
+    time = Column(Date, nullable=False)
+    open = Column(Numeric(18, 8), nullable=False)
+    high = Column(Numeric(18, 8), nullable=False)
+    low = Column(Numeric(18, 8), nullable=False)
+    close = Column(Numeric(18, 8), nullable=False)
+    volume = Column(Numeric(24, 8), nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint('ticker', 'time'),
+    )
+
+
+class MarketCap(Base):
+    __tablename__ = "market_caps"
+
+    timestamp = Column(Date, primary_key=True)  # ← только дата
+    cap = Column(Numeric(24, 6), nullable=False)

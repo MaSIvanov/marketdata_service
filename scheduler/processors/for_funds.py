@@ -1,6 +1,13 @@
-# app/processors/for_funds.py
+# scheduler/processors/for_funds.py
 
 import time
+import logging
+
+from scheduler.clients.moex_client import MOEXClient
+from scheduler.database.dao import upsert_market_data
+from scheduler.database.engine import get_db
+
+logger = logging.getLogger("scheduler.funds")
 
 # Маппинг полей из marketdata → наша модель
 FUND_MARKETDATA_MAP = {
@@ -10,9 +17,8 @@ FUND_MARKETDATA_MAP = {
     "OPEN": "open_price",
     "HIGH": "high_price",
     "LOW": "low_price",
-    "VALTODAY": "volume",              # Объём торгов в деньгах
-    "NUMTRADES": "trades_count",       # Количество сделок
-    # Убраны: capitalization, change_capitalization, trading_status
+    "VALTODAY": "volume",
+    "NUMTRADES": "trades_count",
 }
 
 # Поля из securities
@@ -20,45 +26,41 @@ SEC_FIELDS_MAP = {
     "SHORTNAME": "shortname",
     "PREVPRICE": "prev_price",
     "FACEUNIT": "currency",
-    "LISTLEVEL": "list_level",         # ← добавлено
+    "LISTLEVEL": "list_level",
 }
 
 
 def process_fund_data(raw_data):
     """
     Обрабатывает данные по фондам (ETF) с API Мосбиржи и приводит к общей модели.
-    :param raw_data: dict — ответ от /iss/engines/stock/markets/seltra/boards/TQTF/securities.json
+    :param raw_data: dict — ответ от /iss/engines/stock/markets/shares/boards/TQTF|TQIF/securities.json
     :return: list[dict] — готово к вставке в market_data
     """
     start = time.time()
 
-    # Извлекаем marketdata
     market = raw_data.get("marketdata")
     if not market or "data" not in market:
-        print("WARNING: 'marketdata' missing or invalid")
+        logger.warning("'marketdata' missing or invalid")
         return []
 
     m_columns = market["columns"]
     m_rows = market["data"]
     m_col_idx = {col: idx for idx, col in enumerate(m_columns)}
 
-    # Извлекаем securities
     securities = raw_data.get("securities")
     if not securities or "data" not in securities:
-        print("WARNING: 'securities' missing or invalid")
+        logger.warning("'securities' missing or invalid")
         return []
 
     s_columns = securities["columns"]
     s_rows = securities["data"]
     s_col_idx = {col: idx for idx, col in enumerate(s_columns)}
 
-    # Проверка SECID в securities
     secid_idx = s_col_idx.get("SECID")
     if secid_idx is None:
-        print("ERROR: 'SECID' column not found in securities")
+        logger.error("'SECID' column not found in securities")
         return []
 
-    # Собираем данные из securities
     secid_to_info = {}
     for row in s_rows:
         if len(row) != len(s_columns):
@@ -74,7 +76,6 @@ def process_fund_data(raw_data):
             if value == "" or value is None:
                 value = None
 
-            # Приведение LISTLEVEL к int
             if moex_field == "LISTLEVEL":
                 try:
                     value = int(value) if value not in (None, "") else None
@@ -83,19 +84,15 @@ def process_fund_data(raw_data):
 
             sec_info[local_field] = value
 
-        # Убедимся, что shortname есть
-        sec_info["shortname"] = sec_info.get("shortname") or row[s_col_idx.get("SHORTNAME")] or f"Fund {secid}"
-
+        sec_info["shortname"] = sec_info.get("shortname") or f"Fund {secid}"
         secid_to_info[secid] = sec_info
 
-    # Проверяем обязательные поля в marketdata
     required_market_cols = ["SECID", "BOARDID"]
     if not all(col in m_col_idx for col in required_market_cols):
-        print("ERROR: Required columns missing in marketdata")
+        logger.error("Required columns missing in marketdata")
         return []
 
     parsed = []
-
     for row in m_rows:
         if len(row) != len(m_columns):
             continue
@@ -109,7 +106,6 @@ def process_fund_data(raw_data):
             "instrument_type": "fund",
         }
 
-        # Заполняем поля из marketdata
         for moex_field, local_field in FUND_MARKETDATA_MAP.items():
             if moex_field not in m_col_idx:
                 continue
@@ -117,7 +113,6 @@ def process_fund_data(raw_data):
             if value == "" or value is None:
                 value = None
 
-            # Конвертируем числовые поля
             if local_field in ("last_price", "open_price", "high_price", "low_price"):
                 try:
                     value = float(value) if value is not None else None
@@ -136,15 +131,12 @@ def process_fund_data(raw_data):
 
             item[local_field] = value
 
-        # Добавляем данные из securities
         sec_info = secid_to_info.get(secid, {})
-
         item["shortname"] = sec_info.get("shortname")
-        item["currency"] = sec_info.get("currency", "SUR")  # SUR — рубли по умолчанию
+        item["currency"] = sec_info.get("currency", "SUR")
         item["list_level"] = sec_info.get("list_level")
         prev_price = sec_info.get("prev_price")
 
-        # Расчёт change_abs и change_percent
         last_price = item.get("last_price")
         if last_price is not None and prev_price is not None and prev_price != 0:
             item["change_abs"] = round(last_price - prev_price, 8)
@@ -153,7 +145,6 @@ def process_fund_data(raw_data):
             item["change_abs"] = None
             item["change_percent"] = None
 
-        # Волатильность: (high - low) / open * 100
         open_price = item.get("open_price")
         high_price = item.get("high_price")
         low_price = item.get("low_price")
@@ -162,9 +153,61 @@ def process_fund_data(raw_data):
         else:
             item["volatility_percent"] = None
 
-        # === Поля update_time, trading_status, capitalization — УБРАНЫ ===
-
         parsed.append(item)
 
-    print(f"[Funds] Обработано {len(parsed)} фондов за {time.time() - start:.2f} сек")
+    logger.info(f"[Funds] Обработано {len(parsed)} фондов за {time.time() - start:.2f} сек")
     return parsed
+
+
+async def update_etf_tqtf():
+    """Обновление ETF с площадки TQTF."""
+    logger.info("[ETF_TQTF] Запуск сбора данных...")
+    start_time = time.time()
+
+    async with MOEXClient() as client:
+        try:
+            raw_data = await client.get_tqtf_funds()
+            if not raw_data or 'securities' not in raw_data:
+                logger.warning("[ETF_TQTF] Пустой ответ от API")
+                return
+
+            processed_data = process_fund_data(raw_data)
+            if not processed_data:
+                logger.warning("[ETF_TQTF] Нет данных для сохранения после обработки")
+                return
+
+            async with get_db() as db:
+                await upsert_market_data(db, processed_data)
+
+            duration = time.time() - start_time
+            logger.info(f"[ETF_TQTF] ✅ Успешно сохранено {len(processed_data)} записей за {duration:.2f} сек")
+
+        except Exception as e:
+            logger.error(f"[ETF_TQTF] ❌ Ошибка: {e}", exc_info=True)
+
+
+async def update_etf_tqif():
+    """Обновление ETF с площадки TQIF."""
+    logger.info("[ETF_TQIF] Запуск сбора данных...")
+    start_time = time.time()
+
+    async with MOEXClient() as client:
+        try:
+            raw_data = await client.get_tqif_funds()
+            if not raw_data or 'securities' not in raw_data:
+                logger.warning("[ETF_TQIF] Пустой ответ от API")
+                return
+
+            processed_data = process_fund_data(raw_data)
+            if not processed_data:
+                logger.warning("[ETF_TQIF] Нет данных для сохранения после обработки")
+                return
+
+            async with get_db() as db:
+                await upsert_market_data(db, processed_data)
+
+            duration = time.time() - start_time
+            logger.info(f"[ETF_TQIF] ✅ Успешно сохранено {len(processed_data)} записей за {duration:.2f} сек")
+
+        except Exception as e:
+            logger.error(f"[ETF_TQIF] ❌ Ошибка: {e}", exc_info=True)

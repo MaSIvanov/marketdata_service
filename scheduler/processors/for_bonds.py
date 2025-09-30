@@ -1,6 +1,14 @@
-from datetime import datetime, date
-from typing import List, Dict, Any
+# scheduler/processors/for_bonds.py
+
 import time
+import logging
+from typing import List, Dict, Any
+
+from scheduler.clients.moex_client import MOEXClient
+from scheduler.database.dao import upsert_market_data
+from scheduler.database.engine import get_db
+
+logger = logging.getLogger("scheduler.bonds")
 
 
 def process_bonds_data(raw_data: Dict) -> List[Dict[str, Any]]:
@@ -142,8 +150,6 @@ def process_bonds_data(raw_data: Dict) -> List[Dict[str, Any]]:
         accruedint = sec_info["accruedint"]
         if current_price is not None and accruedint is not None:
             # Полная цена = текущая цена + НКД (в процентах от номинала)
-            # Если current_price в процентах, а accruedint в денежных единицах,
-            # нужно привести к одинаковой размерности
             full_price = round(current_price + (accruedint / sec_info["facevalue"] * 100), 4)
         else:
             full_price = None
@@ -155,21 +161,21 @@ def process_bonds_data(raw_data: Dict) -> List[Dict[str, Any]]:
             # --- Ключи ---
             "secid": secid,
             "boardid": boardid,
-            "instrument_type": "bond",  # ✅ Обязательно задай тип!
+            "instrument_type": "bond",
 
             # --- Идентификация ---
             "isin": sec_info["isin"],
             "shortname": sec_info["shortname"],
 
             # --- Статус ---
-            "list_level": sec_info["listlevel"],  # ✅ исправлено
+            "list_level": sec_info["listlevel"],
 
             # --- Характеристики ---
-            "maturity_date": matdate,  # ✅ исправлено
+            "maturity_date": matdate,
             "couponpercent": sec_info["couponpercent"],
             "couponvalue": sec_info["couponvalue"],
             "couponperiod": sec_info["couponperiod"],
-            "next_coupon_date": nextcoupon,  # ✅ исправлено
+            "next_coupon_date": nextcoupon,
             "facevalue": sec_info["facevalue"],
             "lotsize": sec_info["lotsize"],
             "currency": sec_info["currency"],
@@ -177,16 +183,16 @@ def process_bonds_data(raw_data: Dict) -> List[Dict[str, Any]]:
             "issuesizeplaced": sec_info["issuesizeplaced"],
 
             # --- Рыночные данные ---
-            "last_price": current_price,  # ✅ исправлено
-            "change_abs": lastchange,  # ✅ исправлено
-            "change_percent": lastchangeprcnt,  # ✅ исправлено
+            "last_price": current_price,
+            "change_abs": lastchange,
+            "change_percent": lastchangeprcnt,
             "effectiveyield": market_info.get("effectiveyield"),
             "duration_days": duration_days,
             "duration_years": duration_years,
 
             # --- Ликвидность ---
-            "volume": market_info.get("valtoday"),  # ✅ исправлено
-            "trades_count": market_info.get("numtrades"),  # ✅ исправлено
+            "volume": market_info.get("valtoday"),
+            "trades_count": market_info.get("numtrades"),
 
             # --- НКД и полная цена ---
             "accruedint": accruedint,
@@ -195,5 +201,32 @@ def process_bonds_data(raw_data: Dict) -> List[Dict[str, Any]]:
 
         result.append(item)
 
-    print(f"Processing time: {time.time() - start:.3f}s")
+    logger.info(f"[Bonds] Обработано {len(result)} инструментов за {time.time() - start:.2f} сек")
     return result
+
+
+async def update_bonds():
+    """Полный цикл обновления облигаций: запрос → обработка → сохранение."""
+    logger.info("[Bonds] Запуск сбора данных...")
+    start_time = time.time()
+
+    async with MOEXClient() as client:
+        try:
+            raw_data = await client.get_bonds()
+            if not raw_data or 'securities' not in raw_data:
+                logger.warning("[Bonds] Пустой ответ от API")
+                return
+
+            processed_data = process_bonds_data(raw_data)
+            if not processed_data:
+                logger.warning("[Bonds] Нет данных для сохранения после обработки")
+                return
+
+            async with get_db() as db:
+                await upsert_market_data(db, processed_data)
+
+            duration = time.time() - start_time
+            logger.info(f"[Bonds] ✅ Успешно сохранено {len(processed_data)} записей за {duration:.2f} сек")
+
+        except Exception as e:
+            logger.error(f"[Bonds] ❌ Ошибка: {e}", exc_info=True)
