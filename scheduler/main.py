@@ -7,6 +7,7 @@ import sys
 from contextlib import AsyncExitStack
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -17,14 +18,15 @@ from scheduler.processors.for_funds import update_etf_tqtf, update_etf_tqif
 from scheduler.processors.for_indices import update_indexes
 from scheduler.processors.for_currencies import update_currencies
 from scheduler.processors.for_capitalization import update_capitalization
+from scheduler.processors.for_stocks_candles import update_daily_candles
+from scheduler.processors.for_bonds_candles import update_bond_daily_candles
+from scheduler.processors.for_indices_candles import update_indices_daily_candles
+from scheduler.processors.for_funds_candles import update_tqif_candles, update_tqtf_candles
 # Базовые компоненты
 from scheduler.database.engine import engine
-from scheduler.database.models import Base
 from scheduler.settings import settings
+import pytz
 
-# ========================
-# 🔧 Настройка логирования
-# ========================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -33,16 +35,11 @@ logging.basicConfig(
 logger = logging.getLogger("scheduler")
 
 
-# ========================
-# 🧱 Глобальные переменные
-# ========================
 exit_stack = AsyncExitStack()
-scheduler = AsyncIOScheduler()
+moscow_tz = pytz.timezone('Europe/Moscow')
+scheduler = AsyncIOScheduler(timezone=moscow_tz)
 
 
-# ========================
-# 🛑 Graceful shutdown
-# ========================
 async def shutdown(signal_name: str = None):
     if signal_name:
         logger.info(f"🛑 Получен сигнал {signal_name}. Начинаем остановку...")
@@ -56,9 +53,6 @@ async def shutdown(signal_name: str = None):
     logger.info("✅ Ресурсы освобождены")
 
 
-# ========================
-# ⏳ Ожидание доступности БД
-# ========================
 async def wait_for_db(max_retries: int = 30, delay: int = 2):
     logger.info("⏳ Ожидание доступности БД...")
     temp_engine = create_async_engine(settings.DATABASE_URL)
@@ -78,19 +72,6 @@ async def wait_for_db(max_retries: int = 30, delay: int = 2):
     raise RuntimeError("❌ БД не стала доступна за отведённое время")
 
 
-# ========================
-# 🏗️ Создание таблиц
-# ========================
-async def create_tables_if_not_exist():
-    logger.info("🔄 Проверка и создание таблиц в БД...")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("✅ Таблицы созданы или уже существуют")
-
-
-# ========================
-# 🚦 Первоначальная загрузка
-# ========================
 async def initial_load():
     if not settings.SCHEDULER_INITIAL_LOAD:
         logger.info("⏭️  Пропускаем первоначальную загрузку (настройка)")
@@ -104,7 +85,7 @@ async def initial_load():
         update_etf_tqif(),
         update_indexes(),
         update_currencies(),
-        update_capitalization(),  # ← добавлено
+        update_capitalization(),
     ]
 
     for task in tasks:
@@ -116,9 +97,6 @@ async def initial_load():
     logger.info("✅ Первоначальная загрузка завершена")
 
 
-# ========================
-# ⏱️ Настройка планировщика
-# ========================
 def setup_scheduler():
     try:
         scheduler.add_job(update_stocks, IntervalTrigger(minutes=10), id="update_stocks", misfire_grace_time=300, max_instances=1)
@@ -127,17 +105,48 @@ def setup_scheduler():
         scheduler.add_job(update_etf_tqif, IntervalTrigger(minutes=30), id="update_etf_tqif", misfire_grace_time=300, max_instances=1)
         scheduler.add_job(update_indexes, IntervalTrigger(minutes=30), id="update_indexes", misfire_grace_time=900, max_instances=1)
         scheduler.add_job(update_currencies, IntervalTrigger(hours=1), id="update_currencies", misfire_grace_time=1800, max_instances=1)
-        # ↓ НОВАЯ ЗАДАЧА ↓
         scheduler.add_job(update_capitalization, IntervalTrigger(hours=1), id="update_capitalization", misfire_grace_time=1800, max_instances=1)
-        logger.info("✅ Задачи добавлены в планировщик")
+        # === Ежедневные свечи — со вторника по субботу, 00:30–00:34 MSK ===
+        scheduler.add_job(
+            update_tqif_candles,
+            CronTrigger(hour=0, minute=30, day_of_week="tue-sat", timezone=moscow_tz),
+            id="tqif_daily_candles",
+            misfire_grace_time=7200,
+            max_instances=1
+        )
+        scheduler.add_job(
+            update_tqtf_candles,
+            CronTrigger(hour=0, minute=31, day_of_week="tue-sat", timezone=moscow_tz),
+            id="tqtf_daily_candles",
+            misfire_grace_time=7200,
+            max_instances=1
+        )
+        scheduler.add_job(
+            update_bond_daily_candles,
+            CronTrigger(hour=0, minute=32, day_of_week="tue-sat", timezone=moscow_tz),
+            id="bond_daily_candles",
+            misfire_grace_time=7200,
+            max_instances=1
+        )
+        scheduler.add_job(
+            update_indices_daily_candles,
+            CronTrigger(hour=0, minute=33, day_of_week="tue-sat", timezone=moscow_tz),
+            id="index_daily_candles",
+            misfire_grace_time=7200,
+            max_instances=1
+        )
+        scheduler.add_job(
+            update_daily_candles,
+            CronTrigger(hour=0, minute=34, timezone=moscow_tz),
+            id="daily_candles",
+            misfire_grace_time=7200,
+            max_instances=1
+        )
     except Exception as e:
         logger.error(f"❌ Ошибка настройки планировщика: {e}")
         raise
 
 
-# ========================
-# 🚀 Главная функция
-# ========================
 async def main():
     signals = (signal.SIGINT, signal.SIGTERM)
     for sig in signals:
@@ -148,7 +157,6 @@ async def main():
 
     try:
         await wait_for_db()
-        await create_tables_if_not_exist()
         await initial_load()
 
         setup_scheduler()
@@ -168,9 +176,6 @@ async def main():
         await shutdown()
 
 
-# ========================
-# ▶️ Запуск
-# ========================
 if __name__ == "__main__":
     try:
         asyncio.run(main())

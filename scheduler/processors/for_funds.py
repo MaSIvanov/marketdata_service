@@ -2,7 +2,7 @@
 
 import time
 import logging
-
+from datetime import datetime
 from scheduler.clients.moex_client import MOEXClient
 from scheduler.database.dao import upsert_market_data
 from scheduler.database.engine import get_db

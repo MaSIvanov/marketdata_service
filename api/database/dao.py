@@ -1,10 +1,11 @@
-from typing import List, Literal
-from datetime import date
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, desc, asc
-from api.database.models import MarketData
-
-
+from api.database.models import MarketData, MarketCap, Candle, Company
+from typing import List, Any, Dict
+from api.database.models import Coupons
+from api.bonds.utils import parse_bond_payments
+from datetime import datetime, timedelta, date
+import httpx
 
 class BaseDao:
     @staticmethod
@@ -288,11 +289,228 @@ class IndexDAO:
         return result.scalars().all()
 
 class CapitalizationDAO:
+    @staticmethod
+    def _downsample_records(records: List[Any], max_points: int = 50) -> List[Any]:
+        """
+        Уменьшает количество записей до max_points, равномерно распределяя их по времени.
+        Всегда включает первую и последнюю запись.
+        """
+        n = len(records)
+        if n <= max_points:
+            return records
 
+        # Всегда включаем первую и последнюю
+        result = [records[0]]
+        step = (n - 1) / (max_points - 1)
 
+        # Добавляем промежуточные точки
+        for i in range(1, max_points - 1):
+            idx = int(round(i * step))
+            # Защита от дублей и выхода за границы
+            if idx < n and records[idx] != result[-1]:
+                result.append(records[idx])
+
+        # Гарантируем, что последняя запись включена
+        if result[-1] != records[-1]:
+            result.append(records[-1])
+        return result
 
     @staticmethod
     async def get_capitalization(session: AsyncSession, period: str):
-        if period == "1m":
-            pass
+        today = date.today()
 
+        if period == "1d":
+            start_date = today - timedelta(days=1)
+        elif period == "1w":
+            start_date = today - timedelta(days=7)
+        elif period == "1m":
+            start_date = today - timedelta(days=30)
+        elif period == "6m":
+            start_date = today - timedelta(days=180)
+        elif period == "1y":
+            start_date = today - timedelta(days=365)
+        elif period == "ytd":
+            start_date = date(today.year, 1, 1)
+        else:
+            raise ValueError(f"Unsupported period: {period}")
+
+        stmt = (
+            select(MarketCap)
+            .where(MarketCap.timestamp >= start_date)
+            .order_by(MarketCap.timestamp)
+        )
+        result = await session.execute(stmt)
+        records = result.scalars().all()
+
+        if not records:
+            return {
+                "data": [],
+                "current": None,
+                "change_abs": None,
+                "change_pct": None
+            }
+
+        # Применяем downsample только для больших периодов
+        if period in ("6m", "1y", "ytd"):
+            records = CapitalizationDAO._downsample_records(records, max_points=50)
+
+        current = records[-1].cap
+        first = records[0].cap
+
+        change_abs = float(current - first)
+        change_pct = float((current - first) / first * 100) if first != 0 else 0.0
+
+        data = [
+            [r.timestamp.strftime('%Y-%m-%d'), float(r.cap)]
+            for r in records
+        ]
+
+        return {
+            "current": float(current),
+            "change_abs": change_abs,
+            "change_pct": change_pct,
+            "data": data
+        }
+
+
+class CandlesDAO:
+    @staticmethod
+    def _downsample_records(records: List[Any], max_points: int = 200) -> List[Any]:
+        """Уменьшает количество записей, сохраняя первую, последнюю и равномерно распределяя остальные."""
+        n = len(records)
+        if n <= max_points:
+            return records
+
+        result = [records[0]]
+        step = (n - 1) / (max_points - 1)
+
+        for i in range(1, max_points - 1):
+            idx = int(round(i * step))
+            if idx < n and records[idx] != result[-1]:
+                result.append(records[idx])
+
+        if result[-1] != records[-1]:
+            result.append(records[-1])
+        return result
+
+    @staticmethod
+    async def get_candles(session: AsyncSession, ticker: str, period: str):
+        today = date.today()
+
+        # Определяем начальную дату
+        if period == "1w":
+            start_date = today - timedelta(weeks=1)
+        elif period == "1m":
+            start_date = today - timedelta(days=30)
+        elif period == "6m":
+            start_date = today - timedelta(days=180)
+        elif period == "ytd":
+            start_date = date(today.year, 1, 1)
+        elif period == "1y":
+            start_date = today - timedelta(days=365)
+        elif period == "all":
+            start_date = None  # без ограничения по дате
+        else:
+            raise ValueError(f"Unsupported period: {period}")
+
+        # Запрос данных
+        stmt = select(Candle).where(Candle.ticker == ticker)
+        if start_date is not None:
+            stmt = stmt.where(Candle.date >= start_date)
+        stmt = stmt.order_by(Candle.date)
+
+        result = await session.execute(stmt)
+        records = result.scalars().all()
+
+        if not records:
+            return {
+                "data": [],
+                "change_pct": 0.0
+            }
+
+        # Применяем даунсэмплинг ТОЛЬКО для "all"
+        if period == "all":
+            records = CandlesDAO._downsample_records(records, max_points=200)
+
+        # Формируем данные для графика
+        data = [
+            [
+                r.date.strftime('%Y-%m-%d'),
+                float(r.close),
+                int(r.volume)
+            ]
+            for r in records
+        ]
+
+        # Считаем изменение в процентах
+        first_price = float(records[0].close)
+        last_price = float(records[-1].close)
+        change_pct = ((last_price - first_price) / first_price * 100) if first_price != 0 else 0.0
+
+        return {
+            "data": data,
+            "change_pct": round(change_pct, 2)
+        }
+
+
+class CouponDAO:
+    BONDIZATION_URL = "https://iss.moex.com/iss/securities/{secid}/bondization.json"
+    CACHE_TTL_HOURS = 24
+
+    @classmethod
+    async def get_or_fetch_bond_payments(
+        cls,
+        session: AsyncSession,
+        secid: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Возвращает список событий (купоны, оферты, амортизации, погашения) по secid.
+        Использует локальный кеш (таблица bondization_cache). При отсутствии или устаревании —
+        обращается к API Мосбиржи, сохраняет ответ и возвращает распарсенные данные.
+        """
+        # 1. Попытка получить из кеша
+        result = await session.execute(
+            select(Coupons).where(Coupons.secid == secid)
+        )
+        cached = result.scalar_one_or_none()
+
+        now = datetime.utcnow()
+        ttl = timedelta(hours=cls.CACHE_TTL_HOURS)
+        should_refresh = (
+            cached is None
+            or (now - cached.updated_at) > ttl
+        )
+
+        if not should_refresh:
+            return parse_bond_payments(cached.data)
+
+        # 2. Запрос к внешнему API
+        try:
+            url = cls.BONDIZATION_URL.format(secid=secid)
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params={"limit": "unlimited"})
+                response.raise_for_status()
+                raw_data = response.json()
+        except Exception as e:
+            # Fallback: если API недоступен, но есть старый кеш — вернуть его
+            if cached:
+                return parse_bond_payments(cached.data)
+            raise RuntimeError(f"Failed to fetch bondization data for {secid}: {e}")
+
+        # 3. Сохранение в кеш
+        if cached:
+            cached.data = raw_data
+            cached.updated_at = now
+        else:
+            cached = Coupons(secid=secid, data=raw_data)
+            session.add(cached)
+
+        await session.commit()
+        return parse_bond_payments(raw_data)
+
+
+class CompanyDAO:
+    @staticmethod
+    async def get_company_info(session: AsyncSession, secid: str):
+        result = await session.execute(select(Company).where(Company.secid == secid))
+        return result.scalars().one_or_none()

@@ -3,7 +3,7 @@
 import time
 import logging
 from typing import List, Dict, Any
-
+import datetime
 from scheduler.clients.moex_client import MOEXClient
 from scheduler.database.dao import upsert_market_data
 from scheduler.database.engine import get_db
@@ -30,8 +30,8 @@ def process_bonds_data(raw_data: Dict) -> List[Dict[str, Any]]:
 
         yielddate_str = row[yields_idx["YIELDDATE"]]
         try:
-            yielddate = datetime.strptime(yielddate_str, "%Y-%m-%d").date() if yielddate_str else None
-        except:
+            yielddate = datetime.datetime.strptime(yielddate_str, "%Y-%m-%d").date() if yielddate_str else None
+        except Exception:
             yielddate = None
 
         price_raw = row[yields_idx["PRICE"]]
@@ -125,37 +125,51 @@ def process_bonds_data(raw_data: Dict) -> List[Dict[str, Any]]:
         market_info = market_dict.get((secid, boardid), {})
 
         try:
-            matdate = datetime.strptime(sec_info["matdate_str"], "%Y-%m-%d").date() if sec_info["matdate_str"] else None
+            matdate = datetime.datetime.strptime(sec_info["matdate_str"], "%Y-%m-%d").date() if sec_info["matdate_str"] else None
         except Exception:
             matdate = None
 
         try:
-            nextcoupon = datetime.strptime(sec_info["nextcoupon_str"], "%Y-%m-%d").date() if sec_info["nextcoupon_str"] else None
+            nextcoupon = datetime.datetime.strptime(sec_info["nextcoupon_str"], "%Y-%m-%d").date() if sec_info["nextcoupon_str"] else None
         except Exception:
             nextcoupon = None
+
+        # === Вспомогательная функция для безопасного NUMERIC(10,6) ===
+        def safe_numeric_10_6(value, max_abs=9999.999999):
+            if value is None:
+                return None
+            try:
+                v = float(value)
+                if abs(v) > max_abs:
+                    logger.warning(f"Значение {v} обрезано до ±{max_abs} для NUMERIC(10,6)")
+                    return max_abs if v > 0 else -max_abs
+                return round(v, 6)
+            except (TypeError, ValueError):
+                return None
 
         # === Основные цены ===
         current_price = yield_data["price"]  # ✅ Текущая цена
         prev_price = sec_info["prevprice"]   # ✅ Вчерашняя цена
 
         # Расчёт изменений
-        if current_price is not None and prev_price is not None:
-            lastchange = round(current_price - prev_price, 6)
-            lastchangeprcnt = round((current_price - prev_price) / prev_price * 100, 4) if prev_price != 0 else None
+        if current_price is not None and prev_price is not None and prev_price != 0:
+            lastchange = current_price - prev_price
+            lastchangeprcnt = (current_price - prev_price) / prev_price * 100
         else:
             lastchange = None
             lastchangeprcnt = None
 
         # ✅ ПРАВИЛЬНЫЙ расчёт полной цены (с НКД)
         accruedint = sec_info["accruedint"]
-        if current_price is not None and accruedint is not None:
-            # Полная цена = текущая цена + НКД (в процентах от номинала)
-            full_price = round(current_price + (accruedint / sec_info["facevalue"] * 100), 4)
-        else:
-            full_price = None
+        full_price = None
+        if current_price is not None and accruedint is not None and sec_info["facevalue"]:
+            try:
+                full_price = current_price + (accruedint / sec_info["facevalue"] * 100)
+            except (ZeroDivisionError, TypeError):
+                full_price = None
 
         duration_days = yield_data.get("duration_days")
-        duration_years = round(duration_days / 365.0, 4) if duration_days else None
+        duration_years = duration_days / 365.0 if duration_days else None
 
         item = {
             # --- Ключи ---
@@ -172,31 +186,31 @@ def process_bonds_data(raw_data: Dict) -> List[Dict[str, Any]]:
 
             # --- Характеристики ---
             "maturity_date": matdate,
-            "couponpercent": sec_info["couponpercent"],
-            "couponvalue": sec_info["couponvalue"],
+            "couponpercent": safe_numeric_10_6(sec_info["couponpercent"]),
+            "couponvalue": round(float(sec_info["couponvalue"]), 8) if sec_info["couponvalue"] is not None else None,
             "couponperiod": sec_info["couponperiod"],
             "next_coupon_date": nextcoupon,
-            "facevalue": sec_info["facevalue"],
+            "facevalue": round(float(sec_info["facevalue"]), 8) if sec_info["facevalue"] is not None else None,
             "lotsize": sec_info["lotsize"],
             "currency": sec_info["currency"],
             "issuesize": sec_info["issuesize"],
             "issuesizeplaced": sec_info["issuesizeplaced"],
 
             # --- Рыночные данные ---
-            "last_price": current_price,
-            "change_abs": lastchange,
-            "change_percent": lastchangeprcnt,
-            "effectiveyield": market_info.get("effectiveyield"),
+            "last_price": round(float(current_price), 8) if current_price is not None else None,
+            "change_abs": round(float(lastchange), 8) if lastchange is not None else None,
+            "change_percent": safe_numeric_10_6(lastchangeprcnt),
+            "effectiveyield": safe_numeric_10_6(market_info.get("effectiveyield")),
             "duration_days": duration_days,
-            "duration_years": duration_years,
+            "duration_years": safe_numeric_10_6(duration_years),
 
             # --- Ликвидность ---
             "volume": market_info.get("valtoday"),
             "trades_count": market_info.get("numtrades"),
 
             # --- НКД и полная цена ---
-            "accruedint": accruedint,
-            "full_price": full_price,
+            "accruedint": round(float(accruedint), 8) if accruedint is not None else None,
+            "full_price": round(float(full_price), 8) if full_price is not None else None,
         }
 
         result.append(item)

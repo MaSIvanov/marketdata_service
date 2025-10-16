@@ -8,6 +8,30 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: moex_api
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
 
   scheduler:
@@ -17,21 +41,25 @@ services:
     container_name: moex_scheduler
     env_file:
       - .env
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     restart: unless-stopped
 
-  api:  # ← НОВЫЙ СЕРВИС
-    build:
-      context: .
-      dockerfile: api/Dockerfile
-    container_name: moex_api
-    env_file:
-      - .env
+  nginx:
+    image: nginx:alpine
+    container_name: moex_nginx
     ports:
-      - "8001:8000"
+      - "8080:80"
+      - "8443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
     depends_on:
-      - db
+      - api
     restart: unless-stopped
 
 volumes:

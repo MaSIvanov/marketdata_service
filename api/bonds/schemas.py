@@ -53,6 +53,7 @@ class BondEvent(BaseModel):
 class BondFullInfo(BaseModel):
     secid: str
     shortname: str
+    last_price: Optional[float] = None
     change_percent: Optional[float] = None
     isin: Optional[str] = None
     facevalue: Optional[float] = None

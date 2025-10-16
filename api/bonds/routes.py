@@ -1,15 +1,12 @@
 # markets/bonds/router.py
-
 import logging
 from fastapi import APIRouter, Query, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
-
 from api.database.engine import get_session
-from api.database.dao import BaseDao, BondDAO
+from api.database.dao import BaseDao, BondDAO, CouponDAO
 from api.bonds.schemas import BondForTable, BondEvent, BondFullInfo
 
-# Простой логгер
 logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
@@ -117,3 +114,16 @@ async def get_marketdata_bond(
     except Exception as e:
         logger.error(f"Ошибка при получении акций: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+
+
+@router.get("/coupons/{secid}")
+async def get_coupons_for_secid(
+    secid: str,
+    session: AsyncSession = Depends(get_session)
+):
+    try:
+        events = await CouponDAO.get_or_fetch_bond_payments(session, secid)
+        return events
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+

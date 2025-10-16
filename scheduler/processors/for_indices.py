@@ -35,7 +35,7 @@ SEC_FIELDS_MAP = {
 def process_index_data(raw_data):
     """
     Обрабатывает данные по индексам с API Мосбиржи.
-    :param raw_ dict — ответ от /iss/engines/stock/markets/index/...
+    :param raw_data: dict — ответ от /iss/engines/stock/markets/index/...
     :return: list[dict] — готово к вставке в market_data
     """
     start = time.time()
@@ -104,6 +104,17 @@ def process_index_data(raw_data):
         if not secid or not boardid:
             continue
         if boardid not in VALID_BOARDIDS or secid not in valid_secids:
+            continue
+
+        # === Проверка на VALTODAY (volume) ===
+        valtoday_idx = m_col_idx.get("VALTODAY")
+        valtoday = None
+        if valtoday_idx is not None and valtoday_idx < len(row):
+            valtoday = row[valtoday_idx]
+
+        # Пропускаем, если объём отсутствует, null, пустая строка или 0
+        if valtoday in (None, "", 0, "0"):
+            logger.debug(f"Пропускаем {secid} (board {boardid}): VALTODAY = {valtoday} → индекс не торгуется")
             continue
 
         item = {

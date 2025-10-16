@@ -4,7 +4,7 @@ from typing import Dict
 class MOEXClient(BaseHTTPClient):
     def __init__(self, client=None):
         super().__init__(
-            base_url="https://iss.moex.com/iss",  # ← убраны пробелы в конце
+            base_url="https://iss.moex.com/iss",  # ← убраны пробелы!
             client=client,
             max_connections=20,
             max_keepalive=10
@@ -17,6 +17,20 @@ class MOEXClient(BaseHTTPClient):
             path = f"/engines/{engine}/markets/{market}/securities.json"
         return await self._get_json(path)
 
+    # === НОВЫЙ МЕТОД ===
+    async def get_marketdata_for_candles(self) -> Dict:
+        """
+        Получает только marketdata по акциям с TQBR: SECID, LAST, VOLTODAY.
+        Используется для ежедневного формирования свечей.
+        """
+        path = (
+            "/engines/stock/markets/shares/boards/TQBR/securities.json"
+            "?iss.only=marketdata"
+            "&marketdata.columns=SECID,LAST,VOLTODAY"
+        )
+        return await self._get_json(path)
+
+    # === остальные методы без изменений ===
     async def get_stocks(self) -> Dict:
         """Акции на основном рынке (TQBR)"""
         return await self._fetch_securities("stock", "shares", "TQBR")

@@ -1,104 +1,114 @@
 # api/database/models.py
+from datetime import date, datetime
+from typing import Optional
 from sqlalchemy import (
-    Column, Integer, String, Numeric, DateTime, Date,
-    Index, MetaData, PrimaryKeyConstraint
+    Integer,
+    String,
+    Numeric,
+    DateTime,
+    Date,
+    UniqueConstraint,
+    JSON,
+    BIGINT,
+    Text,
 )
-from sqlalchemy.dialects.postgresql import BIGINT
-from sqlalchemy.ext.declarative import declarative_base
-from datetime import datetime
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-# Рекомендуемое соглашение для именования constraints
-convention = {
-    "ix": "ix_%(column_0_label)s",
-    "uq": "uq_%(table_name)s_%(column_0_name)s",
-    "ck": "ck_%(table_name)s_%(constraint_name)s",
-    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
-    "pk": "pk_%(table_name)s"
-}
 
-metadata = MetaData(naming_convention=convention)
-Base = declarative_base(metadata=metadata)
+class Base(DeclarativeBase):
+    pass
+
 
 class MarketData(Base):
     __tablename__ = "market_data"
 
-    id = Column(Integer, primary_key=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-
-    secid = Column(String(36), nullable=False)
-    boardid = Column(String(12), nullable=False)
-    instrument_type = Column(String(10), nullable=False)
-
-    # Уникальный ключ и индексы
-    __table_args__ = (
-        Index('ix_secid_boardid', 'secid', 'boardid', unique=True),
-        Index('ix_instrument_type', 'instrument_type'),
-        Index('ix_isin', 'isin'),
-        Index('ix_updated_at', 'updated_at'),  # Для очистки старых данных
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )
 
-    # Общие атрибуты
-    shortname = Column(String(255), nullable=True)
-    currency = Column(String(10), nullable=True)
-    list_level = Column(Integer, nullable=True)
+    secid: Mapped[str] = mapped_column(String(36), nullable=False)
+    boardid: Mapped[str] = mapped_column(String(12), nullable=False)
+    instrument_type: Mapped[str] = mapped_column(String(10), nullable=False)
 
-    # Рыночные данные
-    last_price = Column(Numeric(18, 8), nullable=True)
-    open_price = Column(Numeric(18, 8), nullable=True)
-    high_price = Column(Numeric(18, 8), nullable=True)
-    low_price = Column(Numeric(18, 8), nullable=True)
-    change_abs = Column(Numeric(18, 8), nullable=True)
-    change_percent = Column(Numeric(10, 6), nullable=True)
-    volume = Column(BIGINT, nullable=True)
-    trades_count = Column(Integer, nullable=True)
-    volatility_percent = Column(Numeric(10, 6), nullable=True)
-    capitalization = Column(Numeric(20, 2), nullable=True)
-    change_capitalization = Column(Numeric(20, 2), nullable=True)
+    shortname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    currency: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    list_level: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    # Только для индексов
-    annual_high = Column(Numeric(18, 8), nullable=True)
-    annual_low = Column(Numeric(18, 8), nullable=True)
+    last_price: Mapped[Optional[float]] = mapped_column(Numeric(18, 8), nullable=True)
+    open_price: Mapped[Optional[float]] = mapped_column(Numeric(18, 8), nullable=True)
+    high_price: Mapped[Optional[float]] = mapped_column(Numeric(18, 8), nullable=True)
+    low_price: Mapped[Optional[float]] = mapped_column(Numeric(18, 8), nullable=True)
+    change_abs: Mapped[Optional[float]] = mapped_column(Numeric(18, 8), nullable=True)
+    change_percent: Mapped[Optional[float]] = mapped_column(Numeric(10, 6), nullable=True)
+    volume: Mapped[Optional[int]] = mapped_column(BIGINT, nullable=True)
+    trades_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    volatility_percent: Mapped[Optional[float]] = mapped_column(Numeric(10, 6), nullable=True)
+    capitalization: Mapped[Optional[float]] = mapped_column(Numeric(20, 2), nullable=True)
+    change_capitalization: Mapped[Optional[float]] = mapped_column(Numeric(20, 2), nullable=True)
 
-    # Только для облигаций
-    maturity_date = Column(Date, nullable=True)
-    couponpercent = Column(Numeric(10, 6), nullable=True)
-    couponvalue = Column(Numeric(18, 8), nullable=True)
-    couponperiod = Column(Integer, nullable=True)
-    next_coupon_date = Column(Date, nullable=True)
-    accruedint = Column(Numeric(18, 8), nullable=True)
-    full_price = Column(Numeric(18, 8), nullable=True)
-    effectiveyield = Column(Numeric(10, 6), nullable=True)
-    duration_days = Column(Integer, nullable=True)
-    duration_years = Column(Numeric(10, 6), nullable=True)
-    facevalue = Column(Numeric(18, 8), nullable=True)
-    isin = Column(String(50), nullable=True, index=True)
+    annual_high: Mapped[Optional[float]] = mapped_column(Numeric(18, 8), nullable=True)
+    annual_low: Mapped[Optional[float]] = mapped_column(Numeric(18, 8), nullable=True)
 
-    # Дополнительные поля
-    lotsize = Column(Integer, nullable=True)
-    issuesize = Column(BIGINT, nullable=True)
-    issuesizeplaced = Column(BIGINT, nullable=True)
+    maturity_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    couponpercent: Mapped[Optional[float]] = mapped_column(Numeric(10, 6), nullable=True)
+    couponvalue: Mapped[Optional[float]] = mapped_column(Numeric(18, 8), nullable=True)
+    couponperiod: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    next_coupon_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    accruedint: Mapped[Optional[float]] = mapped_column(Numeric(18, 8), nullable=True)
+    full_price: Mapped[Optional[float]] = mapped_column(Numeric(18, 8), nullable=True)
+    effectiveyield: Mapped[Optional[float]] = mapped_column(Numeric(10, 6), nullable=True)
+    duration_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    duration_years: Mapped[Optional[float]] = mapped_column(Numeric(10, 6), nullable=True)
+    facevalue: Mapped[Optional[float]] = mapped_column(Numeric(18, 8), nullable=True)
+    isin: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
+    lotsize: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    issuesize: Mapped[Optional[int]] = mapped_column(BIGINT, nullable=True)
+    issuesizeplaced: Mapped[Optional[int]] = mapped_column(BIGINT, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("secid", "boardid", name="uq_market_data_secid_boardid"),
+    )
 
 
 class Candle(Base):
     __tablename__ = "candles"
 
-    ticker = Column(String(20), nullable=False)
-    time = Column(Date, nullable=False)
-    open = Column(Numeric(18, 8), nullable=False)
-    high = Column(Numeric(18, 8), nullable=False)
-    low = Column(Numeric(18, 8), nullable=False)
-    close = Column(Numeric(18, 8), nullable=False)
-    volume = Column(Numeric(24, 8), nullable=False)
-
-    __table_args__ = (
-        PrimaryKeyConstraint('ticker', 'time'),
-    )
+    ticker: Mapped[str] = mapped_column(String(20), primary_key=True)
+    date: Mapped[date] = mapped_column(Date, primary_key=True)
+    close: Mapped[float] = mapped_column(Numeric(18, 8), nullable=False)
+    volume: Mapped[int] = mapped_column(BIGINT, nullable=False)
 
 
 class MarketCap(Base):
     __tablename__ = "market_caps"
 
-    timestamp = Column(Date, primary_key=True)  # ← только дата
-    cap = Column(Numeric(24, 6), nullable=False)
+    timestamp: Mapped[date] = mapped_column(Date, primary_key=True)
+    cap: Mapped[float] = mapped_column(Numeric(24, 6), nullable=False)
+
+
+class Coupons(Base):
+    __tablename__ = "coupons"
+
+    secid: Mapped[str] = mapped_column(String(51), primary_key=True)
+    data: Mapped[dict] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class Company(Base):
+    __tablename__ = "companies"
+
+    secid: Mapped[str] = mapped_column(Text, primary_key=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    founded: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    headquarters: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    employees: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sector: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ceo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    link: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
